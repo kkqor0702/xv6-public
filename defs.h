@@ -186,5 +186,11 @@ void            switchkvm(void);
 int             copyout(pde_t*, uint, void*, uint);
 void            clearpteu(pde_t *pgdir, char *uva);
 
+// forknexec.c
+int		forknexec(const char*, const char**);
+
+int	 	set_proc_priority(int , int);
+int		get_proc_priority(int);
+
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))

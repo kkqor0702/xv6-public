@@ -7,6 +7,8 @@
 #include "proc.h"
 #include "spinlock.h"
 
+#include "elf.h"
+
 struct {
   struct spinlock lock;
   struct proc proc[NPROC];
@@ -88,6 +90,9 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
+  p->priority = 5; //기본 priority를 5로 설정
+  p->count = 0;
+  p->wait_time = 0;
 
   release(&ptable.lock);
 
@@ -149,6 +154,9 @@ userinit(void)
   acquire(&ptable.lock);
 
   p->state = RUNNABLE;
+  p->priority = 5; //기본 priority를 5로 설정
+  p->count = 0;
+  p->wait_time = 0;
 
   release(&ptable.lock);
 }
@@ -217,6 +225,8 @@ fork(void)
   np->state = RUNNABLE;
 
   release(&ptable.lock);
+  
+  np->priority = curproc->priority; // 자식의 priority를 부모에서 복사
 
   return pid;
 }
@@ -332,6 +342,10 @@ scheduler(void)
 
     // Loop over process table looking for process to run.
     acquire(&ptable.lock);
+    
+    struct proc* selectProc = 0;
+    int best_score = 1000;
+    
     for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
       if(p->state != RUNNABLE)
         continue;
@@ -339,17 +353,41 @@ scheduler(void)
       // Switch to chosen process.  It is the process's job
       // to release ptable.lock and then reacquire it
       // before jumping back to us.
-      c->proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
+      int score = p->priority * 10 - p->wait_time; 
+      if(score < 0)
+        score = 0;
+        
+        
+      if(score < best_score){
+        best_score = score;
+        selectProc = p;
+      }
+    }
 
-      swtch(&(c->scheduler), p->context);
+
+    if(selectProc){
+      selectProc->count++;
+      selectProc->wait_time = 0;
+      
+      c->proc = selectProc;
+      switchuvm(selectProc);
+      selectProc->state = RUNNING;
+
+      swtch(&(c->scheduler), selectProc->context);
       switchkvm();
 
       // Process is done running for now.
       // It should have changed its p->state before coming back.
       c->proc = 0;
     }
+    
+    
+    for (p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+      if (p->state == RUNNABLE && p != selectProc){
+        p->wait_time++;
+      }
+    }
+    
     release(&ptable.lock);
 
   }
@@ -532,3 +570,197 @@ procdump(void)
     cprintf("\n");
   }
 }
+
+int
+forknexec(const char *path, const char **args)
+{
+	// argu error : -1, etc error : -2
+		/** fork 시작 **/
+	int i, pid;
+	struct proc *np;
+	struct proc *curproc = myproc();
+
+	// Allocate process.
+	if((np = allocproc()) == 0) 
+		return -2; // etc err
+
+	// Copy process state from proc.
+	if((np->pgdir = copyuvm(curproc->pgdir, curproc->sz)) == 0){
+		kfree(np->kstack);
+		np->kstack = 0;
+		np->state = UNUSED;
+		return -2; // etc err
+	}
+	np->sz = curproc->sz;
+	np->parent = curproc;
+	*np->tf = *curproc->tf;
+
+	// Clear %eax so that fork returns 0 in the child.
+	np->tf->eax = 0;
+
+	for(i = 0; i < NOFILE; i++)
+		if(curproc->ofile[i])
+			np->ofile[i] = filedup(curproc->ofile[i]);
+	np->cwd = idup(curproc->cwd);
+
+	safestrcpy(np->name, curproc->name, sizeof(curproc->name));
+
+	pid = np->pid;
+
+		/** child proess - exec 시작 **/
+	char *s, *last;
+	int off;
+	uint argc, sz, sp, ustack[3+MAXARG+1];
+	struct elfhdr elf;
+	struct inode *ip;
+	struct proghdr ph;
+	pde_t *pgdir, *oldpgdir;
+
+	begin_op();
+
+	if((ip = namei((char *)path)) == 0){
+		end_op();
+		cprintf("exec: fail\n");
+		return -1;
+	}
+	ilock(ip);
+	pgdir = 0;
+
+	// Check ELF header
+	if(readi(ip, (char*)&elf, 0, sizeof(elf)) != sizeof(elf))
+		goto bad;
+	if(elf.magic != ELF_MAGIC)
+		goto bad;
+
+	if((pgdir = setupkvm()) == 0)
+		goto bad;
+
+	// Load program into memory.
+	sz = 0;
+	for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
+		if(readi(ip, (char*)&ph, off, sizeof(ph)) != sizeof(ph))
+			goto bad;
+		if(ph.type != ELF_PROG_LOAD)
+			continue;
+		if(ph.memsz < ph.filesz)
+			goto bad;
+		if(ph.vaddr + ph.memsz < ph.vaddr)
+			goto bad;
+		if((sz = allocuvm(pgdir, sz, ph.vaddr + ph.memsz)) == 0)
+			goto bad;
+		if(ph.vaddr % PGSIZE != 0)
+			goto bad;
+		if(loaduvm(pgdir, (char*)ph.vaddr, ip, ph.off, ph.filesz) < 0)
+			goto bad;
+	}
+	iunlockput(ip);
+	end_op();
+	ip = 0;
+
+	// Allocate two pages at the next page boundary.
+	// Make the first inaccessible.  Use the second as the user stack.
+	sz = PGROUNDUP(sz);
+	if((sz = allocuvm(pgdir, sz, sz + 2*PGSIZE)) == 0)
+		goto bad;
+	clearpteu(pgdir, (char*)(sz - 2*PGSIZE));
+	sp = sz;
+
+	// Push argument strings, prepare rest of stack in ustack.
+	for(argc = 0; args[argc]; argc++) {
+		if(argc >= MAXARG)
+			goto bad;
+		sp = (sp - (strlen(args[argc]) + 1)) & ~3;
+		if(copyout(pgdir, sp, (char *)args[argc], strlen(args[argc]) + 1) < 0)
+			goto bad;
+		ustack[3+argc] = sp;
+	}
+	ustack[3+argc] = 0;
+
+	ustack[0] = 0xffffffff;  // fake return PC
+	ustack[1] = argc;
+	ustack[2] = sp - (argc+1)*4;  // args pointer
+
+	sp -= (3+argc+1) * 4;
+	if(copyout(pgdir, sp, ustack, (3+argc+1)*4) < 0)
+		goto bad;
+
+	// Save program name for debugging.
+	for(last=s=(char *)path; *s; s++)
+		if(*s == '/')
+			last = s+1;
+	safestrcpy(np->name, last, sizeof(np->name));
+
+	// Commit to the user image.
+	oldpgdir = np->pgdir;
+	np->pgdir = pgdir;
+	np->sz = sz;
+	np->tf->eip = elf.entry;  // main
+	np->tf->esp = sp;
+	switchuvm(np);
+	freevm(oldpgdir);
+	
+	// child process exec exit
+		/** parent process reloading **/
+
+	acquire(&ptable.lock);
+
+	np->state = RUNNABLE;
+
+	release(&ptable.lock);
+
+	wait();
+	return pid;
+	// parent process가 child status를 받으면 정상 return
+
+	bad:
+	if(pgdir)
+		freevm(pgdir);
+	if(ip){
+		iunlockput(ip);
+		end_op();
+	}
+	return -2; // etc err
+}
+
+
+int
+set_proc_priority(int pid, int priority)
+{
+	struct proc *p;
+	
+	if (priority <1 || priority > 10){
+		return -1;
+	}
+	
+	acquire(&ptable.lock);
+	for (p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+	  if (p->pid == pid){
+	    p->priority = priority;
+	    release(&ptable.lock);
+	    return 0;
+	  }
+	}
+	release(&ptable.lock);
+	
+	return -1;
+}
+
+int
+get_proc_priority(int pid)
+{
+	struct proc *p;
+	int gp = -1;
+	
+	acquire(&ptable.lock);
+	for (p = ptable.proc; p <&ptable.proc[NPROC]; p++){
+	  if (p->pid == pid){
+	    gp = p->priority;
+	    break;
+	  }
+	}
+	release(&ptable.lock);
+
+	return gp;
+}
+
+
