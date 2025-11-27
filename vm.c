@@ -401,37 +401,45 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
 void
 pagefault(void)
 {
-  struct proc *p = myproc();       // 현재 실행 중인 프로세스
-  uint va = rcr2();                // CR2 레지스터에서 fault 발생한 가상 주소 읽기
+    struct proc *p = myproc();           // 현재 프로세스
+    uint va = rcr2();                     // CR2에서 fault 발생 가상 주소 읽기
+    pte_t *pte;
 
-  // 가상 주소에 대응되는 PTE 가져오기
-  pte_t *pte = walkpgdir(p->pgdir, (void*)va, 0);
+    // 가상 주소를 페이지 단위로 맞춤
+    uint pg_va = PGROUNDDOWN(va);
 
-  if(!pte) panic("pagefault: PTE not found");
+    // 페이지 테이블에서 PTE 가져오기
+    if((pte = walkpgdir(p->pgdir, (void*)pg_va, 0)) == 0)
+        panic("pagefault: PTE not found");
 
-  // PTE에서 물리 주소 추출
-  uint pa = PTE_ADDR(*pte);
+    if(!(*pte & PTE_P))
+        panic("pagefault: page not present");
 
-  // pa 이용 reference counter 확인 
-  if (get_refcount(pa) > 1){
-    char *mem = kalloc();
-    if (mem == 0){
-      panic("pagefault");
+    uint pa = PTE_ADDR(*pte);             // 물리 주소 추출
+    uint flags = PTE_FLAGS(*pte);         // 기존 플래그
+
+    // refcount 확인
+    if(get_refcount(pa) > 1){
+        // 참조수가 1보다 크면 새로운 페이지 할당 후 복사
+        char *mem = kalloc();
+        if(mem == 0)
+            panic("pagefault: cannot allocate page");
+
+        memmove(mem, (char*)P2V(pa), PGSIZE); // 기존 페이지 내용 복사
+
+        // 새 페이지 매핑 (write 허용)
+        if(mappages(p->pgdir, (void*)pg_va, PGSIZE, V2P(mem), flags | PTE_W) < 0)
+            panic("pagefault: remap failed");
+
+        // 기존 페이지 참조수 감소
+        dec_refcount(pa);
+    } else {
+        // 참조수가 1이면 write 권한만 추가 (기존 페이지 그대로 사용)
+        *pte |= PTE_W;
     }
-    
-    memmove(mem, (char*)P2V(pa), PGSIZE); // 페이지 복사
 
-    uint flags = PTE_FLAGS(*pte);
-    *pte = V2P(mem) | flags | PTE_W;
-    dec_refcount(pa);  //기존 페이지 참조수 감소
-  }
-
-  // 1인 경우
-  else {
-    *pte |= PTE_W; // write 권한만
-  }
-
-  lcr3(V2P(p->pgdir));
+    // TLB 갱신
+    lcr3(V2P(p->pgdir));
 }
 
 
