@@ -421,9 +421,8 @@ pagefault(void)
     
     memmove(mem, (char*)P2V(pa), PGSIZE); // 페이지 복사
 
-    if (mappages(p->pgdir, (void*)PGROUNDDOWN(va), PGSIZE, V2P(mem), PTE_FLAGS(*pte)|PTE_W) < 0){
-      panic("pagefault");
-    }
+    uint flags = PTE_FLAGS(*pte);
+    *pte = V2P(mem) | flags | PTE_W;
     dec_refcount(pa);  //기존 페이지 참조수 감소
   }
 
