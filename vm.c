@@ -413,7 +413,7 @@ pagefault(void)
   uint pa = PTE_ADDR(*pte);
 
   // pa 이용 reference counter 확인 
-  if (get_reference(pa) > 1){
+  if (get_refcount(pa) > 1){
     char *mem = kalloc();
     if (mem == 0){
       panic("pagefault");
