@@ -318,7 +318,7 @@ copyuvm(pde_t *pgdir, uint sz)
   pde_t *d;
   pte_t *pte;
   uint pa, i, flags;
-  char *mem;
+  // char *mem;
 
   if((d = setupkvm()) == 0)
     return 0;
@@ -327,6 +327,7 @@ copyuvm(pde_t *pgdir, uint sz)
       panic("copyuvm: pte should exist");
     if(!(*pte & PTE_P))
       panic("copyuvm: page not present");
+
     pa = PTE_ADDR(*pte);
     flags = PTE_FLAGS(*pte);
 
@@ -337,7 +338,6 @@ copyuvm(pde_t *pgdir, uint sz)
     inc_refcount(pa); // inc_refcount() 호출
 
     
-    inc_refcount(V2P(mem)); //inc_refcount 함수 호출
 
     // 자식 페이지가 부모 사용하도록
     if (mappages(d, (void*)i, PGSIZE, pa, flags) < 0){
@@ -355,10 +355,6 @@ copyuvm(pde_t *pgdir, uint sz)
 
 
   return d;
-
-bad:
-  freevm(d);
-  return 0;
 }
 
 //PAGEBREAK!
@@ -417,20 +413,18 @@ pagefault(void)
   uint pa = PTE_ADDR(*pte);
 
   // pa 이용 reference counter 확인 
-  if (get_refence(pa) > 1){
+  if (get_reference(pa) > 1){
     char *mem = kalloc();
     if (mem == 0){
       panic("pagefault");
     }
     
-    memmove(mem, (char*)P2v(pa), PGSIZE); // 페이지 복사
+    memmove(mem, (char*)P2V(pa), PGSIZE); // 페이지 복사
 
     if (mappages(p->pgdir, (void*)PGROUNDDOWN(va), PGSIZE, V2P(mem), PTE_FLAGS(*pte)|PTE_W) < 0){
       panic("pagefault");
     }
-
     dec_refcount(pa);  //기존 페이지 참조수 감소
-    inc_refcount(V2P(mem));  // 새 페이지 참조스 증가
   }
 
   // 1인 경우
