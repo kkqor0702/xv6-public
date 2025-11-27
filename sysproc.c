@@ -93,5 +93,6 @@ sys_uptime(void)
 int
 sys_getNumFreePages(void)
 {
+  extern int num_free_pages;
   return num_free_pages;
 }
