@@ -318,43 +318,41 @@ copyuvm(pde_t *pgdir, uint sz)
   pde_t *d;
   pte_t *pte;
   uint pa, i, flags;
-  // char *mem;
 
   if((d = setupkvm()) == 0)
     return 0;
+
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walkpgdir(pgdir, (void *) i, 0)) == 0)
       panic("copyuvm: pte should exist");
     if(!(*pte & PTE_P))
       panic("copyuvm: page not present");
 
-    pa = PTE_ADDR(*pte);
-    flags = PTE_FLAGS(*pte);
-
-    // if((mem = kalloc()) == 0)
-    //   goto bad;
-    flags &= ~PTE_W; // Write 권한 없앰
-
-    inc_refcount(pa); // inc_refcount() 호출
-
-    
-
-    // 자식 페이지가 부모 사용하도록
-    if (mappages(d, (void*)i, PGSIZE, pa, flags) < 0){
-      freevm(d);
-      return 0;
+    // [핵심 수정 1] 쓰기 권한이 있다면, 부모의 PTE에서 직접 제거합니다.
+    if(*pte & PTE_W){
+        *pte &= ~PTE_W;
     }
+
+    pa = PTE_ADDR(*pte);
+    flags = PTE_FLAGS(*pte); // 위에서 PTE를 수정했으므로, flags에도 반영됨
+
+    // [확인] 여기서 flags는 이미 PTE_W가 꺼져있는 상태입니다.
+    if (mappages(d, (void*)i, PGSIZE, pa, flags) < 0){
+      goto bad;
+    }
+
+    // 참조 카운트 증가
+    inc_refcount(pa);
   }
 
-  //   memmove(mem, (char*)P2V(pa), PGSIZE);
-  //   if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
-  //     kfree(mem);
-  //     goto bad;
-  //   }
-  // }
-
+  // [핵심 수정 2] 부모의 페이지 테이블을 수정했으므로, TLB를 반드시 새로고침해야 합니다.
+  lcr3(V2P(pgdir));
 
   return d;
+
+bad:
+  freevm(d);
+  return 0;
 }
 
 //PAGEBREAK!
@@ -401,45 +399,59 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
 void
 pagefault(void)
 {
-    struct proc *p = myproc();           // 현재 프로세스
-    uint va = rcr2();                     // CR2에서 fault 발생 가상 주소 읽기
-    pte_t *pte;
+  struct proc *p = myproc();
+  uint va = rcr2();
+  pte_t *pte;
+  uint pa;
+  char *mem;
 
-    // 가상 주소를 페이지 단위로 맞춤
-    uint pg_va = PGROUNDDOWN(va);
+  // [디버깅] 이 로그가 너무 많이 뜨면 주석 처리하세요.
+  // cprintf("PF: pid=%d va=0x%x ip=0x%x\n", p->pid, va, p->tf->eip);
 
-    // 페이지 테이블에서 PTE 가져오기
-    if((pte = walkpgdir(p->pgdir, (void*)pg_va, 0)) == 0)
-        panic("pagefault: PTE not found");
+  // 1. 유효성 체크
+  if(va >= KERNBASE || va >= p->sz) {
+     p->killed = 1;
+     return;
+  }
 
-    if(!(*pte & PTE_P))
-        panic("pagefault: page not present");
+  // 2. PTE 가져오기
+  if((pte = walkpgdir(p->pgdir, (void*)va, 0)) == 0) {
+      p->killed = 1;
+      return;
+  }
+  
+  if(!(*pte & PTE_P) || !(*pte & PTE_U)) {
+      p->killed = 1;
+      return;
+  }
 
-    uint pa = PTE_ADDR(*pte);             // 물리 주소 추출
-    uint flags = PTE_FLAGS(*pte);         // 기존 플래그
+  pa = PTE_ADDR(*pte);
+  uint flags = PTE_FLAGS(*pte);
 
-    // refcount 확인
-    if(get_refcount(pa) > 1){
-        // 참조수가 1보다 크면 새로운 페이지 할당 후 복사
-        char *mem = kalloc();
-        if(mem == 0)
-            panic("pagefault: cannot allocate page");
-
-        memmove(mem, (char*)P2V(pa), PGSIZE); // 기존 페이지 내용 복사
-
-        // 새 페이지 매핑 (write 허용)
-        if(mappages(p->pgdir, (void*)pg_va, PGSIZE, V2P(mem), flags | PTE_W) < 0)
-            panic("pagefault: remap failed");
-
-        // 기존 페이지 참조수 감소
-        dec_refcount(pa);
-    } else {
-        // 참조수가 1이면 write 권한만 추가 (기존 페이지 그대로 사용)
-        *pte |= PTE_W;
+  // 3. CoW 처리 로직
+  if (get_refcount(pa) > 1) {
+    // [Case 1] 공유 중 -> 복사
+    mem = kalloc();
+    if(mem == 0){
+        p->killed = 1;
+        return;
     }
+    
+    memmove(mem, (char*)P2V(pa), PGSIZE);
+    
+    // *pte 값을 직접 변경 (중요!)
+    *pte = V2P(mem) | flags | PTE_W;
+    
+    dec_refcount(pa);
+  } 
+  else {
+    // [Case 2] 나만 사용 중 -> 권한만 변경
+    *pte |= PTE_W;
+  }
 
-    // TLB 갱신
-    lcr3(V2P(p->pgdir));
+  // 4. [핵심] TLB 갱신 (이게 없으면 무한 루프!)
+  // 변경된 페이지 테이블 내용을 CPU가 인지하도록 함
+  lcr3(V2P(p->pgdir));
 }
 
 

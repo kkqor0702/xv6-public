@@ -73,19 +73,33 @@ kfree(char *v)
   if((uint)v % PGSIZE || v < end || V2P(v) >= PHYSTOP)
     panic("kfree");
 
-  // Fill with junk to catch dangling refs.
-  memset(v, 1, PGSIZE);
+  // 1. 물리 주소 구하기
+  uint pa = V2P(v);
 
-  // refcount 감소
-  dec_refcount(V2P(v));   
+  // 2. [핵심 로직] 참조 카운트 관리
+  // kinit(부팅) 과정에서는 ref_count가 0일 수 있으므로, 
+  // 0보다 클 때만 감소시켜야 안전합니다.
+  if(get_refcount(pa) > 0) {
+      dec_refcount(pa);
+  }
+
+  // 3. [방어 로직] 아직 누군가 쓰고 있다면(참조 > 0), 절대 해제하면 안 됨!
+  if(get_refcount(pa) > 0) {
+      return; // 함수 종료 (메모리 해제 안 함)
+  }
+
+  // --- 아래는 참조 카운트가 0일 때만 실행됨 (진짜 해제) ---
+
+  memset(v, 1, PGSIZE);
 
   if(kmem.use_lock)
     acquire(&kmem.lock);
   r = (struct run*)v;
   r->next = kmem.freelist;
   kmem.freelist = r;
-
-  num_free_pages++; //증가
+  
+  // num_free_pages 관리 (1단계 과제 내용)
+  num_free_pages++; 
 
   if(kmem.use_lock)
     release(&kmem.lock);
