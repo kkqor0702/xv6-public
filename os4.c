@@ -2,30 +2,30 @@
 #include "stat.h"
 #include "user.h"
 
-int
-main(void)
-{
-    int *x = malloc(sizeof(int));  // 동적 메모리 할당
-    *x = 1;
+// 전역 변수
+int data = 2021;
 
-    printf(1, "Before fork: x=%d, address : %p\n", *x, x);
+int main(void) {
+    printf(1, "=== CoW Test ===\n");
 
-    int pid = fork();
-    
-    // child process
-    if (pid == 0) {
-        printf(1, "Before Child : x=%d address : %p\n", *x, x);
-        *x = 2;  // 쓰기: CoW 발생
-        printf(1, "CoW !");
-        printf(1, "After Child : x=%d address : %p\n", *x, x);
+    printf(1, "free pages : %d\n", getNumFreePages());
+
+    if(fork() == 0){
+        // 자식 프로세스
+        printf(1, "after fork - free pages: %d\n", getNumFreePages());
+
+        // 읽기만 하면 페이지 복사 안 됨
+        int val = data;
+        printf(1, "val : %d, just read - free pages: %d\n", val, getNumFreePages());
+
+        // 쓰기 하면 페이지 복사 발생
+        data = 1673;
+        printf(1, "data : %d, after write - free pages: %d\n", data, getNumFreePages());
+
         exit();
     }
 
-    // parent process
-    wait();  // 자식 종료 대기
-    printf(1, "Parent : x=%d address : %p\n", *x, x);
-
-    free(x);
+    wait();
+    printf(1, "=== Test End ===\n");
     exit();
 }
-
