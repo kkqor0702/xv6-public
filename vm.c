@@ -329,14 +329,31 @@ copyuvm(pde_t *pgdir, uint sz)
       panic("copyuvm: page not present");
     pa = PTE_ADDR(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto bad;
-    memmove(mem, (char*)P2V(pa), PGSIZE);
-    if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
-      kfree(mem);
-      goto bad;
+
+    // if((mem = kalloc()) == 0)
+    //   goto bad;
+    flags &= ~PTE_W; // Write 권한 없앰
+
+    inc_refcount(pa); // inc_refcount() 호출
+
+    
+    inc_refcount(V2P(mem)); //inc_refcount 함수 호출
+
+    // 자식 페이지가 부모 사용하도록
+    if (mappages(d, (void*)i, PGSIZE, pa, flags) < 0){
+      freevm(d);
+      return 0;
     }
   }
+
+  //   memmove(mem, (char*)P2V(pa), PGSIZE);
+  //   if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
+  //     kfree(mem);
+  //     goto bad;
+  //   }
+  // }
+
+
   return d;
 
 bad:
@@ -384,6 +401,47 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
   }
   return 0;
 }
+
+void
+pagefault(void)
+{
+  struct proc *p = myproc();       // 현재 실행 중인 프로세스
+  uint va = rcr2();                // CR2 레지스터에서 fault 발생한 가상 주소 읽기
+
+  // 가상 주소에 대응되는 PTE 가져오기
+  pte_t *pte = walkpgdir(p->pgdir, (void*)va, 0);
+
+  if(!pte) panic("pagefault: PTE not found");
+
+  // PTE에서 물리 주소 추출
+  uint pa = PTE_ADDR(*pte);
+
+  // pa 이용 reference counter 확인 
+  if (get_refence(pa) > 1){
+    char *mem = kalloc();
+    if (mem == 0){
+      panic("pagefault");
+    }
+    
+    memmove(mem, (char*)P2v(pa), PGSIZE); // 페이지 복사
+
+    if (mappages(p->pgdir, (void*)PGROUNDDOWN(va), PGSIZE, V2P(mem), PTE_FLAGS(*pte)|PTE_W) < 0){
+      panic("pagefault");
+    }
+
+    dec_refcount(pa);  //기존 페이지 참조수 감소
+    inc_refcount(V2P(mem));  // 새 페이지 참조스 증가
+  }
+
+  // 1인 경우
+  else {
+    *pte |= PTE_W; // write 권한만
+  }
+
+  lcr3(V2P(p->pgdir));
+}
+
+
 
 //PAGEBREAK!
 // Blank page.
