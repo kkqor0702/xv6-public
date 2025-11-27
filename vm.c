@@ -399,58 +399,36 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
 void
 pagefault(void)
 {
-  struct proc *p = myproc();
-  uint va = rcr2();
+  struct proc *curproc = myproc();
+  uint va = rcr2(); // 1. Page Fault가 발생한 가상 주소 읽기
   pte_t *pte;
   uint pa;
   char *mem;
+  uint flags;
 
-  // 1. 유효성 체크
-  if(va >= KERNBASE || va >= p->sz) {
-     p->killed = 1;
-     return;
-  }
 
-  // 2. PTE 가져오기
-  if((pte = walkpgdir(p->pgdir, (void*)va, 0)) == 0) {
-      p->killed = 1;
-      return;
-  }
-  
-  if(!(*pte & PTE_P) || !(*pte & PTE_U)) {
-      p->killed = 1;
-      return;
-  }
+  pte = walkpgdir(curproc->pgdir, (void*)va, 0);
 
   pa = PTE_ADDR(*pte);
-  uint flags = PTE_FLAGS(*pte);
+  flags = PTE_FLAGS(*pte);
 
-  // 3. CoW 처리 로직
+
   if (get_refcount(pa) > 1) {
-    // [Case 1] 공유 중 -> 복사
-    mem = kalloc();
-    if(mem == 0){
-        p->killed = 1;
+    if((mem = kalloc()) == 0){
+        curproc->killed = 1; 
         return;
     }
     
     memmove(mem, (char*)P2V(pa), PGSIZE);
-    
-    // *pte 값을 직접 변경 (중요!)
     *pte = V2P(mem) | flags | PTE_W;
-    
     dec_refcount(pa);
-  } 
-  else {
-    // [Case 2] 나만 사용 중 -> 권한만 변경
+
+  } else {
     *pte |= PTE_W;
   }
 
-  // 4. [핵심] TLB 갱신 (이게 없으면 무한 루프!)
-  // 변경된 페이지 테이블 내용을 CPU가 인지하도록 함
-  lcr3(V2P(p->pgdir));
+  lcr3(V2P(curproc->pgdir));
 }
-
 
 
 //PAGEBREAK!
