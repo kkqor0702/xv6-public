@@ -119,17 +119,13 @@ kalloc(void)
 int
 getNumFreePages(void)
 {
+    int pages;
+
     acquire(&kmem.lock);
-    struct run *r = kmem.freelist;
-    int count = 0;
-
-    while(r){
-        count++;
-        r = r->next;
-    }
-
+    pages = num_free_pages; 
     release(&kmem.lock);
-    return count;
+
+    return pages;
 }
 
 //2-2 함수 구현
