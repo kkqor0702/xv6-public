@@ -328,15 +328,15 @@ copyuvm(pde_t *pgdir, uint sz)
     if(!(*pte & PTE_P))
       panic("copyuvm: page not present");
 
-    // [핵심 수정 1] 쓰기 권한이 있다면, 부모의 PTE에서 직접 제거합니다.
+    // 부모의 Write 권한 없애기
     if(*pte & PTE_W){
         *pte &= ~PTE_W;
     }
 
     pa = PTE_ADDR(*pte);
-    flags = PTE_FLAGS(*pte); // 위에서 PTE를 수정했으므로, flags에도 반영됨
+    flags = PTE_FLAGS(*pte); 
 
-    // [확인] 여기서 flags는 이미 PTE_W가 꺼져있는 상태입니다.
+    // 할당안했으니까 kfree X
     if (mappages(d, (void*)i, PGSIZE, pa, flags) < 0){
       goto bad;
     }
@@ -345,7 +345,7 @@ copyuvm(pde_t *pgdir, uint sz)
     inc_refcount(pa);
   }
 
-  // [핵심 수정 2] 부모의 페이지 테이블을 수정했으므로, TLB를 반드시 새로고침해야 합니다.
+  // context switching 시 매번 호출되어야 함
   lcr3(V2P(pgdir));
 
   return d;
@@ -404,9 +404,6 @@ pagefault(void)
   pte_t *pte;
   uint pa;
   char *mem;
-
-  // [디버깅] 이 로그가 너무 많이 뜨면 주석 처리하세요.
-  // cprintf("PF: pid=%d va=0x%x ip=0x%x\n", p->pid, va, p->tf->eip);
 
   // 1. 유효성 체크
   if(va >= KERNBASE || va >= p->sz) {
